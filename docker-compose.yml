@@ -10,5 +10,14 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
 
+  # Redis: usar i9pdv-local-redis já rodando na porta 6379
+  # Para subir Redis dedicado: descomentar bloco abaixo e mudar porta para 6380
+  # redis:
+  #   image: redis:7-alpine
+  #   ports:
+  #     - "6380:6379"
+  #   volumes:
+  #     - redisdata:/data
+
 volumes:
   pgdata:

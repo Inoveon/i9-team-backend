@@ -1,37 +1,113 @@
 import type { FastifyInstance } from 'fastify'
+import { execSync } from 'child_process'
 import { captureSession, sendKeys } from '../tmux/service.js'
+
+/**
+ * Navega no TUI do Claude Code até o índice desejado (1-based) e confirma.
+ * Claude Code usa setas ↑/↓ para navegar — não aceita número digitado.
+ * @param currentIndex índice atual do cursor no TUI (detectado pelo ❯)
+ */
+function selectMenuOption(session: string, targetIndex: number, currentIndex = 1): void {
+  const delta = targetIndex - currentIndex
+  const key = delta >= 0 ? 'Down' : 'Up'
+  const presses = Math.abs(delta)
+  for (let i = 0; i < presses; i++) {
+    execSync(`tmux send-keys -t ${JSON.stringify(session)} ${key}`)
+  }
+  execSync(`tmux send-keys -t ${JSON.stringify(session)} Enter`)
+}
 
 interface SubscribeMsg    { type: 'subscribe';      session: string }
 interface InputMsg        { type: 'input';           keys: string }
-interface SelectOptionMsg { type: 'select_option';  session: string; value: string }
+interface SelectOptionMsg { type: 'select_option';  session: string; value: string; currentIndex?: number }
 
 type ClientMsg = SubscribeMsg | InputMsg | SelectOptionMsg
 
 interface MenuOption {
   index: number
   label: string
+  current?: boolean
 }
 
-/**
- * Detecta se o output tmux contém um menu interativo do Claude Code.
- * Reconhece padrões como:
- *   "  1. Nome da opção"
- *   "❯ 1 Nome da opção"
- *   "  ○ 1. Label"
- * e indicadores de navegação "Enter to select" / "↑/↓ to navigate"
- */
-function parseInteractiveMenu(data: string): { options: MenuOption[] } | null {
-  if (!data.includes('Enter to select') && !data.includes('↑/↓ to navigate')) return null
+// Linha que marca o INÍCIO de um menu interativo do Claude Code
+const MENU_HEADER_RE = /^\s*(\?|›|>)?\s*(Select|Choose|Pick)\b/i
 
-  const options: MenuOption[] = []
+// Linhas de navegação/rodapé que NÃO são opções — encerram o bloco de opções
+const NAV_LINE_RE = /Enter to (select|confirm)|Esc to (exit|cancel)|↑|↓|←|→|to adjust|to navigate|Use arrow/i
+
+/**
+ * Detecta se o output tmux contém um menu interativo do Claude Code e extrai as opções.
+ *
+ * Estratégia:
+ *  1. Encontrar a linha de cabeçalho do menu (ex: "Select model for this session:")
+ *  2. A partir daí, coletar apenas linhas que sejam opções numeradas ou com bullet
+ *  3. Parar ao encontrar uma linha de navegação (rodapé) ou uma linha em branco após opções
+ *
+ * Opções reconhecidas (apenas dentro do bloco):
+ *  - "  1. Label"  /  "  1) Label"
+ *  - "❯ 1. Label"  /  "○ 1. Label"
+ *  - "❯ Label"     /  "○ Label"   (bullet sem número — índice sequencial)
+ */
+function parseInteractiveMenu(data: string): { options: MenuOption[]; currentIndex: number } | null {
   const lines = data.split('\n')
-  for (const line of lines) {
-    const match = line.match(/^\s*[❯○◉]?\s*(\d+)[.)]\s+(.+?)\s*$/)
-    if (match) {
-      options.push({ index: parseInt(match[1], 10), label: match[2].trim() })
+
+  // Fase 1 — localizar o cabeçalho do menu
+  let menuStart = -1
+  for (let i = 0; i < lines.length; i++) {
+    if (MENU_HEADER_RE.test(lines[i])) {
+      menuStart = i
+      break
     }
   }
-  return options.length > 0 ? { options } : null
+  if (menuStart === -1) return null
+
+  // Fase 2 — coletar opções a partir da linha seguinte ao cabeçalho
+  const options: MenuOption[] = []
+  let autoIndex = 1
+  let foundAny = false
+  let currentIndex = 1 // índice 1-based da opção com cursor ❯
+
+  for (let i = menuStart + 1; i < lines.length; i++) {
+    const line = lines[i]
+
+    // Parar ao atingir rodapé de navegação
+    if (NAV_LINE_RE.test(line)) break
+
+    // Parar em linha vazia DEPOIS de já ter coletado pelo menos uma opção
+    if (foundAny && line.trim() === '') break
+
+    // Detectar se esta linha tem o cursor ativo (❯) — strip ANSI antes
+    const cleanLine = line.replace(/\x1b\[[0-9;]*[mGKHF]/g, '')
+    const isCurrent = /^\s*❯/.test(cleanLine)
+
+    // Opção numerada: "  1. Label" / "❯ 1. Label" / "○ 2) Label"
+    const numbered = line.match(/^\s*[❯○◉►]?\s*(\d+)[.)]\s+(.+?)\s*$/)
+    if (numbered) {
+      // Limpar artefatos de ANSI/escape que possam vir junto com o label
+      const label = numbered[2].replace(/\x1b\[[0-9;]*m/g, '').trim()
+      if (label) {
+        const idx = parseInt(numbered[1], 10)
+        options.push({ index: idx, label, current: isCurrent })
+        if (isCurrent) currentIndex = idx
+        foundAny = true
+      }
+      continue
+    }
+
+    // Opção bullet sem número: "❯ Label" / "○ Label"
+    const bullet = line.match(/^\s*[❯○◉►●]\s+(.+?)\s*$/)
+    if (bullet) {
+      const label = bullet[1].replace(/\x1b\[[0-9;]*m/g, '').trim()
+      if (label) {
+        const idx = autoIndex++
+        options.push({ index: idx, label, current: isCurrent })
+        if (isCurrent) currentIndex = idx
+        foundAny = true
+      }
+    }
+  }
+
+  return options.length > 0 ? { options, currentIndex } : null
 }
 
 export async function wsHandler(app: FastifyInstance) {
@@ -62,7 +138,7 @@ export async function wsHandler(app: FastifyInstance) {
             // Detectar menu interativo antes de emitir output
             const menu = parseInteractiveMenu(output)
             if (menu) {
-              socket.send(JSON.stringify({ type: 'interactive_menu', session, options: menu.options }))
+              socket.send(JSON.stringify({ type: 'interactive_menu', session, options: menu.options, currentIndex: menu.currentIndex }))
             }
 
             // Sempre emite o output completo também
@@ -89,8 +165,12 @@ export async function wsHandler(app: FastifyInstance) {
           sendKeys(currentSession, msg.keys)
 
         } else if (msg.type === 'select_option' && msg.session && msg.value) {
-          // Envia o valor da opção selecionada para a sessão tmux
-          sendKeys(msg.session, msg.value)
+          // Claude Code TUI: navegar com setas relativas até o índice + Enter
+          const idx = parseInt(msg.value, 10)
+          const cur = (msg as SelectOptionMsg).currentIndex ?? 1
+          if (!isNaN(idx)) {
+            selectMenuOption(msg.session, idx, cur)
+          }
         }
       } catch {
         socket.send(JSON.stringify({ type: 'error', message: 'Mensagem inválida' }))
@@ -103,7 +183,7 @@ export async function wsHandler(app: FastifyInstance) {
 
   /**
    * WebSocket por URL — compatibilidade: /ws/:session
-   * Inicia streaming automaticamente sem aguardar subscribe.
+   * Inicia streaming automaticamente + aceita input/select_option do cliente.
    */
   app.get<{ Params: { session: string } }>(
     '/ws/:session',
@@ -117,12 +197,39 @@ export async function wsHandler(app: FastifyInstance) {
           const output = captureSession(session, 50)
           if (output !== lastOutput) {
             lastOutput = output
+
+            const menu = parseInteractiveMenu(output)
+            if (menu) {
+              socket.send(JSON.stringify({ type: 'interactive_menu', session, options: menu.options, currentIndex: menu.currentIndex }))
+            }
+
             socket.send(JSON.stringify({ type: 'output', session, data: output }))
           }
         } catch {
           // sessão pode ter fechado
         }
       }, 2000)
+
+      // Handler de mensagens do cliente — necessário para input e select_option
+      socket.on('message', (raw: Buffer | string) => {
+        try {
+          const msg = JSON.parse(raw.toString()) as ClientMsg
+          console.log(`[ws/:session] msg recebida type=${msg.type} session=${session}`)
+
+          if (msg.type === 'input' && msg.keys) {
+            console.log(`[ws/:session] sendKeys session=${session} keys=${JSON.stringify(msg.keys)}`)
+            sendKeys(session, msg.keys)
+
+          } else if (msg.type === 'select_option' && msg.value) {
+            const target = (msg as SelectOptionMsg).session || session
+            console.log(`[ws/:session] select_option target=${target} value=${msg.value}`)
+            sendKeys(target, msg.value)
+          }
+        } catch (err) {
+          console.error('[ws/:session] erro ao processar mensagem:', err)
+          socket.send(JSON.stringify({ type: 'error', message: 'Mensagem inválida' }))
+        }
+      })
 
       socket.on('close', () => clearInterval(interval))
       socket.on('error', () => clearInterval(interval))
