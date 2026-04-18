@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import { execSync } from 'child_process'
 import { captureSession, sendKeys } from '../tmux/service.js'
+import { parseMessageStream } from './parseMessageStream.js'
 
 /**
  * Navega no TUI do Claude Code até o índice desejado (1-based) e confirma.
@@ -180,6 +181,11 @@ export async function wsHandler(app: FastifyInstance) {
             if (menu) {
               socket.send(JSON.stringify({ type: 'interactive_menu', session, menuType: menu.type, options: menu.options, currentIndex: menu.currentIndex }))
             }
+
+            const streamEvents = parseMessageStream(output).filter(e => e.type !== 'interactive_menu')
+            if (streamEvents.length > 0) {
+              socket.send(JSON.stringify({ type: 'message_stream', session, events: streamEvents }))
+            }
           }
         } catch {
           // sessão pode ter fechado
@@ -243,6 +249,11 @@ export async function wsHandler(app: FastifyInstance) {
             if (menu) {
               socket.send(JSON.stringify({ type: 'interactive_menu', session, menuType: menu.type, options: menu.options, currentIndex: menu.currentIndex }))
             }
+
+            const streamEvents = parseMessageStream(output).filter(e => e.type !== 'interactive_menu')
+            if (streamEvents.length > 0) {
+              socket.send(JSON.stringify({ type: 'message_stream', session, events: streamEvents }))
+            }
           }
         } catch {
           // sessão pode ter fechado
@@ -274,4 +285,28 @@ export async function wsHandler(app: FastifyInstance) {
       socket.on('error', () => clearInterval(interval))
     }
   )
+
+  /**
+   * Debug endpoint — GET /debug/parse-stream?agent=session-name
+   * Captura o output atual do agente e retorna os eventos parseados.
+   */
+  app.get<{ Querystring: { agent?: string } }>('/debug/parse-stream', async (request, reply) => {
+    const agent = request.query.agent ?? ''
+    if (!agent) {
+      return reply.status(400).send({ error: 'Parâmetro ?agent= obrigatório' })
+    }
+    try {
+      const raw = captureSession(agent, 50)
+      const events = parseMessageStream(raw)
+      return {
+        agent,
+        lines: raw.split('\n').length,
+        eventCount: events.length,
+        events,
+        raw: raw.slice(0, 2000),
+      }
+    } catch (err) {
+      return reply.status(500).send({ error: String(err) })
+    }
+  })
 }
