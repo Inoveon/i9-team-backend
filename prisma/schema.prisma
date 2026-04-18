@@ -1,0 +1,22 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model TeamSession {
+  id        String    @id @default(cuid())
+  project   String
+  team      String
+  agent     String
+  session   String
+  startedAt DateTime  @default(now())
+  stoppedAt DateTime?
+
+  @@index([project, team])
+  @@index([session])
+}
