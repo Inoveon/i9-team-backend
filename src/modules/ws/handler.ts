@@ -29,92 +29,119 @@ interface MenuOption {
   current?: boolean
 }
 
-// Linha que marca o INÍCIO de um menu interativo do Claude Code
-// Padrões: "Select model", "? 1. Option", "Como deseja..?", ou qualquer linha terminada com ?
-const MENU_HEADER_RE = /(\?|Select|Choose|Pick|Como|Qual|O que|Deseja|Prefere|Quer)\b/i
+interface ParseResult {
+  type: 'numbered' | 'bullet' | 'mcp' | 'inline'
+  options: MenuOption[]
+  currentIndex: number
+}
 
-// Linhas de navegação/rodapé que NÃO são opções — encerram o bloco de opções
-const NAV_LINE_RE = /Enter to (select|confirm)|Esc to (exit|cancel)|↑|↓|←|→|to adjust|to navigate|Use arrow|Type something/i
+const FOOTER_RE = /(Enter to (confirm|select|cancel)|Esc to (exit|cancel)|↑.{0,3}↓ to (navigate|select)|↑↓ to (navigate|select))/i
+const INLINE_OPTIONS_RE = /(\d+:\s*\w+\s+){2,}/
 
-/**
- * Detecta se o output tmux contém um menu interativo do Claude Code e extrai as opções.
- *
- * Estratégia:
- *  1. Procurar por QUALQUER linha que contenha uma pergunta (tem ?) ou palavras-chave (Select, Choose, Como, etc)
- *  2. A partir daí, coletar linhas que sejam opções numeradas (1. 2. 3.) ou bullets (❯, ○, ◉)
- *  3. Parar ao encontrar navegação (rodapé), linha vazia ou prompt (❯)
- *
- * Opções reconhecidas:
- *  - "  1. Label"  /  "❯ 1. Label"  /  "○ 2) Label"
- *  - "❯ Label"     /  "○ Label"   (bullet sem número — índice sequencial)
- */
-function parseInteractiveMenu(data: string): { options: MenuOption[]; currentIndex: number } | null {
-  const lines = data.split('\n')
+function isMcpOption(line: string): boolean {
+  return /^ {4}\S/.test(line) && /·\s*(✔|✘|△)/.test(line)
+}
+function isMcpCursor(line: string): boolean {
+  return /^( {2})?❯ /.test(line)
+}
 
-  // Fase 1 — localizar a pergunta/cabeçalho do menu
-  // Procura por: "?" ou palavras-chave (Select, Choose, Como, Qual, O que, etc)
-  let menuStart = -1
+function parseInteractiveMenu(raw: string): ParseResult | null {
+  // Só analisa as últimas 20 linhas — menu ativo sempre está no final do output
+  const data = raw.replace(/\x1b\[[0-9;]*[mGKHFJA-Z]/g, '')
+  const allLines = data.split('\n')
+  const lines = allLines.slice(-20)
+
+  // Estratégia 1: bottom-up — achar o footer mais recente, depois subir para o header
+  // Evita pegar menus de histórico anterior no output
+  let footerIdx = -1
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (FOOTER_RE.test(lines[i])) { footerIdx = i; break }
+  }
+
+  // Footer obrigatório — sem footer não é menu interativo real
+  if (footerIdx !== -1) {
+    // Subir a partir do footer para achar o header mais próximo acima
+    let start = -1
+    for (let i = footerIdx - 1; i >= 0; i--) {
+      const line = lines[i]
+      const isHeader =
+        (/[?●☐]/.test(line) && !/^\s*\?(\s+for\b|$)/.test(line)) ||
+        /^\s*(Select|Choose|Pick|Manage|Set|How|Selecione|Escolha|Qual|Como)\b/i.test(line)
+      if (isHeader) { start = i; break }
+    }
+    if (start === -1) start = 0
+
+    // MCP-style primeiro: cursor indent=2 + opções indent=4 com status
+    const mcpOptions: MenuOption[] = []
+    let mcpAutoIndex = 1
+    let mcpCurrentIndex = 1
+    for (let i = start + 1; i < footerIdx; i++) {
+      const l = lines[i]
+      if (isMcpCursor(l)) {
+        const label = l.replace(/^ {2}❯ /, '').trim()
+        if (label) { mcpOptions.push({ index: mcpAutoIndex, label, current: true }); mcpCurrentIndex = mcpAutoIndex++ }
+      } else if (isMcpOption(l)) {
+        mcpOptions.push({ index: mcpAutoIndex++, label: l.trim() })
+      }
+    }
+    if (mcpOptions.length > 1) {
+      return { type: 'mcp', options: mcpOptions, currentIndex: mcpCurrentIndex }
+    }
+
+    // Numbered/bullet
+    const options: MenuOption[] = []
+    let autoIndex = 1
+    let currentIndex = 1
+
+    for (let i = start + 1; i < footerIdx; i++) {
+      const l = lines[i]
+      const isCurrent = /^\s*❯/.test(l)
+
+      const numbered = l.match(/^\s*[❯○◉►]?\s*(\d+)[.)]\s+(.+?)\s*$/)
+      if (numbered && !l.includes('│') && !l.includes('├') && !l.includes('└')) {
+        const label = numbered[2].trim()
+        if (label && !/←.*→|→.*←/.test(label)) {
+          const idx = parseInt(numbered[1], 10)
+          options.push({ index: idx, label, current: isCurrent })
+          if (isCurrent) currentIndex = idx
+        }
+        continue
+      }
+
+      const bullet = l.match(/^\s*[❯○◉►●]\s+(.+?)\s*$/)
+      if (bullet) {
+        const label = bullet[1].trim()
+        if (label && !/←.*→|→.*←/.test(label)) {
+          const idx = autoIndex++
+          options.push({ index: idx, label, current: isCurrent })
+          if (isCurrent) currentIndex = idx
+        }
+      }
+    }
+
+    if (options.length > 0) {
+      const type = options.some(o => o.index > 1) ? 'numbered' : 'bullet'
+      return { type, options, currentIndex }
+    }
+  }
+
+  // Estratégia 2: inline rating ("1: Bad  2: Fine  3: Good")
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]
-    // Skip linhas vazias e linhas que já têm opções (numeradas/bullet)
-    if (line.trim() === '' || /^\s*[0-9❯○◉►●]/.test(line)) continue
+    if (!INLINE_OPTIONS_RE.test(lines[i])) continue
+    const prevLine = i > 0 ? lines[i - 1] : ''
+    if (!prevLine.trim() || !/[?●]/.test(prevLine)) continue
 
-    if (MENU_HEADER_RE.test(line)) {
-      menuStart = i
-      break
+    const options: MenuOption[] = []
+    const matches = lines[i].matchAll(/(\d+):\s*(\w+)/g)
+    for (const m of matches) {
+      options.push({ index: parseInt(m[1], 10), label: m[2].trim() })
     }
-  }
-  if (menuStart === -1) return null
-
-  // Fase 2 — coletar opções a partir da linha seguinte
-  const options: MenuOption[] = []
-  let autoIndex = 1
-  let foundAny = false
-  let currentIndex = 1
-
-  for (let i = menuStart + 1; i < lines.length; i++) {
-    const line = lines[i]
-
-    // Parar ao atingir rodapé de navegação
-    if (NAV_LINE_RE.test(line)) break
-
-    // Parar em linha vazia DEPOIS de já ter coletado opções
-    if (foundAny && line.trim() === '') break
-
-    // Parar ao atingir o cursor (❯) do prompt — fim das opções
-    if (foundAny && /^\s*❯\s*$/.test(line)) break
-
-    // Strip ANSI antes de processar
-    const cleanLine = line.replace(/\x1b\[[0-9;]*[mGKHF]/g, '')
-    const isCurrent = /^\s*❯/.test(cleanLine)
-
-    // Opção numerada: "  1. Label" / "❯ 1. Label" / "○ 2) Label"
-    const numbered = line.match(/^\s*[❯○◉►]?\s*(\d+)[.)]\s+(.+?)\s*$/)
-    if (numbered) {
-      const label = numbered[2].replace(/\x1b\[[0-9;]*m/g, '').trim()
-      if (label && label.length > 0) {
-        const idx = parseInt(numbered[1], 10)
-        options.push({ index: idx, label, current: isCurrent })
-        if (isCurrent) currentIndex = idx
-        foundAny = true
-      }
-      continue
-    }
-
-    // Opção bullet sem número: "❯ Label" / "○ Label"
-    const bullet = line.match(/^\s*[❯○◉►●]\s+(.+?)\s*$/)
-    if (bullet) {
-      const label = bullet[1].replace(/\x1b\[[0-9;]*m/g, '').trim()
-      if (label && label.length > 0) {
-        const idx = autoIndex++
-        options.push({ index: idx, label, current: isCurrent })
-        if (isCurrent) currentIndex = idx
-        foundAny = true
-      }
+    if (options.length >= 2) {
+      return { type: 'inline', options, currentIndex: options[0].index }
     }
   }
 
-  return options.length > 0 ? { options, currentIndex } : null
+  return null
 }
 
 export async function wsHandler(app: FastifyInstance) {
@@ -135,21 +162,24 @@ export async function wsHandler(app: FastifyInstance) {
     function startStreaming(session: string) {
       if (interval) clearInterval(interval)
       lastOutput = ''
+      let tickCount = 0
 
       interval = setInterval(() => {
         try {
           const output = captureSession(session, 50)
-          if (output !== lastOutput) {
-            lastOutput = output
+          tickCount++
+          const changed = output !== lastOutput
+          // Sempre envia na primeira vez e a cada 5 ticks (10s) mesmo sem mudança
+          if (changed || tickCount === 1 || tickCount % 5 === 0) {
+            if (changed) lastOutput = output
 
-            // Detectar menu interativo antes de emitir output
             const menu = parseInteractiveMenu(output)
-            if (menu) {
-              socket.send(JSON.stringify({ type: 'interactive_menu', session, options: menu.options, currentIndex: menu.currentIndex }))
-            }
+            console.log(`[ws] session=${session} menu=${menu ? `${menu.type}(${menu.options.length} opts): ${menu.options.map(o=>o.label).join(' | ')}` : 'null'}`)
 
-            // Sempre emite o output completo também
-            socket.send(JSON.stringify({ type: 'output', session, data: output }))
+            socket.send(JSON.stringify({ type: 'output', session, data: output, hasMenu: !!menu }))
+            if (menu) {
+              socket.send(JSON.stringify({ type: 'interactive_menu', session, menuType: menu.type, options: menu.options, currentIndex: menu.currentIndex }))
+            }
           }
         } catch {
           // sessão pode ter fechado
@@ -198,19 +228,21 @@ export async function wsHandler(app: FastifyInstance) {
     (socket, request) => {
       const { session } = request.params
       let lastOutput = ''
+      let tickCount = 0
 
       const interval = setInterval(() => {
         try {
           const output = captureSession(session, 50)
-          if (output !== lastOutput) {
-            lastOutput = output
+          tickCount++
+          const changed = output !== lastOutput
+          if (changed || tickCount === 1 || tickCount % 5 === 0) {
+            if (changed) lastOutput = output
 
             const menu = parseInteractiveMenu(output)
+            socket.send(JSON.stringify({ type: 'output', session, data: output, hasMenu: !!menu }))
             if (menu) {
-              socket.send(JSON.stringify({ type: 'interactive_menu', session, options: menu.options, currentIndex: menu.currentIndex }))
+              socket.send(JSON.stringify({ type: 'interactive_menu', session, menuType: menu.type, options: menu.options, currentIndex: menu.currentIndex }))
             }
-
-            socket.send(JSON.stringify({ type: 'output', session, data: output }))
           }
         } catch {
           // sessão pode ter fechado

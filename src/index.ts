@@ -37,7 +37,6 @@ await app.register(authPlugin)
 await app.register(async (instance) => {
   instance.addHook('onRequest', async (request, reply) => {
     try {
-      // WebSocket não suporta headers — aceitar token via query param ?token=
       const query = request.query as Record<string, string>
       if (!request.headers.authorization && query.token) {
         request.headers.authorization = `Bearer ${query.token}`
