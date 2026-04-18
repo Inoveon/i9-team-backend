@@ -18,8 +18,13 @@
     "@fastify/jwt": "^9.0.0",
     "@fastify/rate-limit": "^10.0.0",
     "@fastify/websocket": "^11.0.0",
+    "@prisma/adapter-pg": "^7.7.0",
     "@prisma/client": "^7.0.0",
+    "@types/pg": "^8.20.0",
+    "dotenv": "^17.4.2",
     "fastify": "^5.2.0",
+    "node-pty": "^1.1.0",
+    "pg": "^8.20.0",
     "zod": "^3.23.0"
   },
   "devDependencies": {
