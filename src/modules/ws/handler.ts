@@ -30,42 +30,47 @@ interface MenuOption {
 }
 
 // Linha que marca o INÍCIO de um menu interativo do Claude Code
-const MENU_HEADER_RE = /^\s*(\?|›|>)?\s*(Select|Choose|Pick)\b/i
+// Padrões: "Select model", "? 1. Option", "Como deseja..?", ou qualquer linha terminada com ?
+const MENU_HEADER_RE = /(\?|Select|Choose|Pick|Como|Qual|O que|Deseja|Prefere|Quer)\b/i
 
 // Linhas de navegação/rodapé que NÃO são opções — encerram o bloco de opções
-const NAV_LINE_RE = /Enter to (select|confirm)|Esc to (exit|cancel)|↑|↓|←|→|to adjust|to navigate|Use arrow/i
+const NAV_LINE_RE = /Enter to (select|confirm)|Esc to (exit|cancel)|↑|↓|←|→|to adjust|to navigate|Use arrow|Type something/i
 
 /**
  * Detecta se o output tmux contém um menu interativo do Claude Code e extrai as opções.
  *
  * Estratégia:
- *  1. Encontrar a linha de cabeçalho do menu (ex: "Select model for this session:")
- *  2. A partir daí, coletar apenas linhas que sejam opções numeradas ou com bullet
- *  3. Parar ao encontrar uma linha de navegação (rodapé) ou uma linha em branco após opções
+ *  1. Procurar por QUALQUER linha que contenha uma pergunta (tem ?) ou palavras-chave (Select, Choose, Como, etc)
+ *  2. A partir daí, coletar linhas que sejam opções numeradas (1. 2. 3.) ou bullets (❯, ○, ◉)
+ *  3. Parar ao encontrar navegação (rodapé), linha vazia ou prompt (❯)
  *
- * Opções reconhecidas (apenas dentro do bloco):
- *  - "  1. Label"  /  "  1) Label"
- *  - "❯ 1. Label"  /  "○ 1. Label"
+ * Opções reconhecidas:
+ *  - "  1. Label"  /  "❯ 1. Label"  /  "○ 2) Label"
  *  - "❯ Label"     /  "○ Label"   (bullet sem número — índice sequencial)
  */
 function parseInteractiveMenu(data: string): { options: MenuOption[]; currentIndex: number } | null {
   const lines = data.split('\n')
 
-  // Fase 1 — localizar o cabeçalho do menu
+  // Fase 1 — localizar a pergunta/cabeçalho do menu
+  // Procura por: "?" ou palavras-chave (Select, Choose, Como, Qual, O que, etc)
   let menuStart = -1
   for (let i = 0; i < lines.length; i++) {
-    if (MENU_HEADER_RE.test(lines[i])) {
+    const line = lines[i]
+    // Skip linhas vazias e linhas que já têm opções (numeradas/bullet)
+    if (line.trim() === '' || /^\s*[0-9❯○◉►●]/.test(line)) continue
+
+    if (MENU_HEADER_RE.test(line)) {
       menuStart = i
       break
     }
   }
   if (menuStart === -1) return null
 
-  // Fase 2 — coletar opções a partir da linha seguinte ao cabeçalho
+  // Fase 2 — coletar opções a partir da linha seguinte
   const options: MenuOption[] = []
   let autoIndex = 1
   let foundAny = false
-  let currentIndex = 1 // índice 1-based da opção com cursor ❯
+  let currentIndex = 1
 
   for (let i = menuStart + 1; i < lines.length; i++) {
     const line = lines[i]
@@ -73,19 +78,21 @@ function parseInteractiveMenu(data: string): { options: MenuOption[]; currentInd
     // Parar ao atingir rodapé de navegação
     if (NAV_LINE_RE.test(line)) break
 
-    // Parar em linha vazia DEPOIS de já ter coletado pelo menos uma opção
+    // Parar em linha vazia DEPOIS de já ter coletado opções
     if (foundAny && line.trim() === '') break
 
-    // Detectar se esta linha tem o cursor ativo (❯) — strip ANSI antes
+    // Parar ao atingir o cursor (❯) do prompt — fim das opções
+    if (foundAny && /^\s*❯\s*$/.test(line)) break
+
+    // Strip ANSI antes de processar
     const cleanLine = line.replace(/\x1b\[[0-9;]*[mGKHF]/g, '')
     const isCurrent = /^\s*❯/.test(cleanLine)
 
     // Opção numerada: "  1. Label" / "❯ 1. Label" / "○ 2) Label"
     const numbered = line.match(/^\s*[❯○◉►]?\s*(\d+)[.)]\s+(.+?)\s*$/)
     if (numbered) {
-      // Limpar artefatos de ANSI/escape que possam vir junto com o label
       const label = numbered[2].replace(/\x1b\[[0-9;]*m/g, '').trim()
-      if (label) {
+      if (label && label.length > 0) {
         const idx = parseInt(numbered[1], 10)
         options.push({ index: idx, label, current: isCurrent })
         if (isCurrent) currentIndex = idx
@@ -98,7 +105,7 @@ function parseInteractiveMenu(data: string): { options: MenuOption[]; currentInd
     const bullet = line.match(/^\s*[❯○◉►●]\s+(.+?)\s*$/)
     if (bullet) {
       const label = bullet[1].replace(/\x1b\[[0-9;]*m/g, '').trim()
-      if (label) {
+      if (label && label.length > 0) {
         const idx = autoIndex++
         options.push({ index: idx, label, current: isCurrent })
         if (isCurrent) currentIndex = idx
