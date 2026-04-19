@@ -2,6 +2,8 @@ import type { FastifyInstance } from 'fastify'
 import { execSync } from 'child_process'
 import { captureSession, sendKeys } from '../tmux/service.js'
 import { parseMessageStream } from './parseMessageStream.js'
+import { broadcastChatMessage } from '../chat/ws.js'
+import { createMessage } from '../chat/service.js'
 
 /**
  * Navega no TUI do Claude Code até o índice desejado (1-based) e confirma.
@@ -185,6 +187,16 @@ export async function wsHandler(app: FastifyInstance) {
             const streamEvents = parseMessageStream(output).filter(e => e.type !== 'interactive_menu')
             if (streamEvents.length > 0) {
               socket.send(JSON.stringify({ type: 'message_stream', session, events: streamEvents }))
+
+              // Publica eventos relevantes no canal de chat do team (usando session como teamId)
+              for (const evt of streamEvents) {
+                if (evt.type === 'claude_text' || evt.type === 'user_input') {
+                  const role = evt.type === 'claude_text' ? 'agent' : 'user'
+                  createMessage({ teamId: session, role, content: evt.content })
+                    .then(msg => broadcastChatMessage(session, msg))
+                    .catch(() => { /* DB pode estar offline */ })
+                }
+              }
             }
           }
         } catch {

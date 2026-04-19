@@ -15,6 +15,8 @@ import { syncTeamsFromConfig } from './modules/teams/sync.js'   // sync teams.js
 import { wsHandler } from './modules/ws/handler.js'
 import { uploadsRoutes } from './modules/uploads/routes.js'
 import { startCleanupWorker, scheduleCleanupJob } from './modules/uploads/cleanup-worker.js'
+import { chatRoutes } from './modules/chat/routes.js'
+import { chatWsHandler } from './modules/chat/ws.js'
 
 const app = Fastify({ logger: true })
 
@@ -49,6 +51,8 @@ await app.register(async (instance) => {
   await instance.register(teamsDbRoutes)
   await instance.register(wsHandler)
   await instance.register(uploadsRoutes)
+  await instance.register(chatRoutes)
+  await instance.register(chatWsHandler)
 })
 
 app.get('/health', async () => ({ status: 'ok', ts: Date.now() }))

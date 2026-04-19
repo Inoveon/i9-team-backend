@@ -28,6 +28,17 @@ model Agent {
   @@index([teamId])
 }
 
+model ChatMessage {
+  id        String   @id @default(cuid())
+  teamId    String
+  agentId   String?
+  role      String   // 'user' | 'agent' | 'system'
+  content   String
+  createdAt DateTime @default(now())
+
+  @@index([teamId, createdAt])
+}
+
 model TeamSession {
   id        String    @id @default(cuid())
   project   String

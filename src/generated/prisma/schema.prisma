@@ -1,0 +1,53 @@
+generator client {
+  provider     = "prisma-client-js"
+  output       = "../src/generated/prisma"
+  compilerType = "library"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Team {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  createdAt   DateTime @default(now())
+  agents      Agent[]
+}
+
+model Agent {
+  id          String  @id @default(cuid())
+  teamId      String
+  name        String
+  role        String
+  sessionName String?
+  team        Team    @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, name])
+  @@index([teamId])
+}
+
+model ChatMessage {
+  id        String   @id @default(cuid())
+  teamId    String
+  agentId   String?
+  role      String // 'user' | 'agent' | 'system'
+  content   String
+  createdAt DateTime @default(now())
+
+  @@index([teamId, createdAt])
+}
+
+model TeamSession {
+  id        String    @id @default(cuid())
+  project   String
+  team      String
+  agent     String
+  session   String
+  startedAt DateTime  @default(now())
+  stoppedAt DateTime?
+
+  @@index([project, team])
+  @@index([session])
+}
