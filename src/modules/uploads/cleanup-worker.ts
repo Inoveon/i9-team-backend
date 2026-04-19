@@ -1,12 +1,13 @@
 import { Worker, Queue } from 'bullmq'
 import { readdirSync, statSync, unlinkSync, existsSync, mkdirSync } from 'node:fs'
+import { config } from '../../config.js'
 
-const UPLOAD_DIR = process.env.UPLOAD_DIR ?? '/tmp/i9-team-uploads'
+const UPLOAD_DIR = config.uploadDir
 const MAX_AGE_MS = 24 * 60 * 60 * 1000 // 24h
 
 const redisConnection = {
-  host: process.env.REDIS_HOST ?? 'localhost',
-  port: parseInt(process.env.REDIS_PORT ?? '6379', 10),
+  host: config.redisHost,
+  port: config.redisPort,
 }
 
 export const cleanupQueue = new Queue('cleanup-uploads', { connection: redisConnection })

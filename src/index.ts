@@ -16,8 +16,6 @@ import { wsHandler } from './modules/ws/handler.js'
 import { uploadsRoutes } from './modules/uploads/routes.js'
 import { startCleanupWorker, scheduleCleanupJob } from './modules/uploads/cleanup-worker.js'
 
-const UPLOAD_DIR = process.env.UPLOAD_DIR ?? '/tmp/i9-team-uploads'
-
 const app = Fastify({ logger: true })
 
 await app.register(cors, { origin: true })
@@ -27,7 +25,7 @@ await app.register(multipart)
 await app.register(rateLimit, { max: 100, timeWindow: '1 minute' })
 await app.register(websocket)
 // Servir arquivos de upload como estáticos em /uploads/*
-await app.register(staticFiles, { root: UPLOAD_DIR, prefix: '/uploads/' })
+await app.register(staticFiles, { root: config.uploadDir, prefix: '/uploads/' })
 
 // Auth routes (public)
 await app.register(authPlugin)
