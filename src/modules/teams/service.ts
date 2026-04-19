@@ -21,11 +21,17 @@ interface TeamsJson {
 }
 
 export function loadTeamsConfig(): TeamsJson {
-  if (!existsSync(config.teamsJsonPath)) {
+  try {
+    if (!existsSync(config.teamsJsonPath)) {
+      console.warn(`[teams] Arquivo não encontrado: ${config.teamsJsonPath}. Retornando vazio.`)
+      return {}
+    }
+    const raw = readFileSync(config.teamsJsonPath, 'utf8')
+    return JSON.parse(raw) as TeamsJson
+  } catch (err) {
+    console.error(`[teams] Erro ao carregar ${config.teamsJsonPath}:`, (err as Error).message)
     return {}
   }
-  const raw = readFileSync(config.teamsJsonPath, 'utf8')
-  return JSON.parse(raw) as TeamsJson
 }
 
 export function startTeam(project: string, team: string): { ok: boolean; message: string } {

@@ -1,0 +1,20 @@
+{
+  "meu-projeto": {
+    "dev": {
+      "name": "dev",
+      "agents": [
+        { "name": "orchestrator", "session": "meu-projeto-dev-orchestrator" },
+        { "name": "backend",      "session": "meu-projeto-dev-backend" },
+        { "name": "frontend",     "session": "meu-projeto-dev-frontend" }
+      ],
+      "startScript": "/home/user/projetos/meu-projeto/scripts/start-team-dev.sh",
+      "stopScript":  "/home/user/projetos/meu-projeto/scripts/stop-team-dev.sh"
+    },
+    "qa": {
+      "name": "qa",
+      "agents": [
+        { "name": "tester", "session": "meu-projeto-qa-tester" }
+      ]
+    }
+  }
+}
