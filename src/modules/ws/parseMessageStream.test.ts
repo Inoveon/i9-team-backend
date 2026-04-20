@@ -141,15 +141,55 @@ Enter to confirm`
   assert.ok(menu!.title?.includes('Confirmar'))
 })
 
-test('detecta menu com opções bullet', () => {
-  const raw = `● Selecione o modelo
-❯ claude-opus-4-5
-  claude-sonnet-4-5
+test('detecta menu /model com ❯ + N. indentado (caso real Claude Code)', () => {
+  // Formato típico do menu /model: header ☐, 1ª opção com ❯, demais com N.
+  // indentado. Reescrito após BUG #1 — não depende mais do fallback "linha
+  // plaina indentada sem glifo".
+  const raw = `☐ Selecione o modelo
+❯ 1. claude-opus-4-5
+  2. claude-sonnet-4-5
 Enter to select`
   const events = parseMessageStream(raw)
-  const menu = events.find(e => e.type === 'interactive_menu') as { options: string[] } | undefined
-  assert.ok(menu)
+  const menu = events.find(e => e.type === 'interactive_menu') as { options: string[]; title?: string } | undefined
+  assert.ok(menu, 'deve ter interactive_menu')
   assert.ok(menu!.options.length >= 2)
+  assert.ok(menu!.options.some(o => o.includes('opus')))
+  assert.ok(menu!.options.some(o => o.includes('sonnet')))
+})
+
+// ─── não-regressão BUG #1: prosa do orquestrador NÃO vira menu ─────────────
+
+test('BUG#1: "● Vou executar 3 etapas: 1. clonar 2. instalar" vira claude_text', () => {
+  const raw = '● Vou executar 3 etapas: 1. clonar 2. instalar 3. testar.'
+  const events = parseMessageStream(raw)
+  assert.ok(!events.some(e => e.type === 'interactive_menu'), 'NÃO deve virar menu')
+  assert.ok(events.some(e => e.type === 'claude_text'), 'deve virar claude_text')
+})
+
+test('BUG#1: "● Plano: 1) clonar 2) instalar" (parêntese) NÃO vira menu', () => {
+  // Parêntese em "1)" não é mais aceito em MENU_NUMBERED_RE (só ponto).
+  // Além disso, `●` não é mais título de menu — então o bloco nem é avaliado.
+  const raw = `● Plano:
+  1) clonar repo
+  2) instalar deps
+Enter to confirm`
+  const events = parseMessageStream(raw)
+  assert.ok(!events.some(e => e.type === 'interactive_menu'), 'NÃO deve virar menu')
+  assert.ok(events.some(e => e.type === 'claude_text'), 'deve ter claude_text do ● header')
+})
+
+test('BUG#1: "● título... 1. opção 2. opção + Enter to confirm" NÃO vira menu', () => {
+  // Caso clássico que quebrava: header ●, opções N. legítimas, footer em prosa.
+  // Com ● fora de MENU_TITLE_RE, o bloco de menu sequer é avaliado.
+  const raw = `● Plano resumido:
+  1. Ler teams.json
+  2. Validar schema
+  3. Rodar sync
+Confirma? Enter to confirm no chat.`
+  const events = parseMessageStream(raw)
+  assert.ok(!events.some(e => e.type === 'interactive_menu'), 'NÃO deve virar menu')
+  const text = events.find(e => e.type === 'claude_text') as { content: string } | undefined
+  assert.ok(text, 'deve ter claude_text')
 })
 
 // ─── ruído filtrado ───────────────────────────────────────────────────────────

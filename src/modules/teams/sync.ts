@@ -25,15 +25,23 @@ interface TeamsFile {
   projects: TeamsFileProject[]
 }
 
+export interface SyncResult {
+  teams: number
+  agents: number
+}
+
 /**
  * Lê ~/.claude/teams.json e faz upsert no PostgreSQL.
  * Chave única de Team: "projeto/team" (ex: "i9-team/dev")
  * Chave única de Agent: teamId + name
+ *
+ * Retorna as contagens de teams e agentes processados. NÃO remove registros
+ * órfãos (se um agente foi removido do teams.json, permanece no DB).
  */
-export async function syncTeamsFromConfig(): Promise<void> {
+export async function syncTeamsFromConfig(): Promise<SyncResult> {
   if (!existsSync(config.teamsJsonPath)) {
     console.warn(`[sync] teams.json não encontrado em: ${config.teamsJsonPath}`)
-    return
+    return { teams: 0, agents: 0 }
   }
 
   let file: TeamsFile
@@ -42,7 +50,7 @@ export async function syncTeamsFromConfig(): Promise<void> {
     file = JSON.parse(raw) as TeamsFile
   } catch (err) {
     console.error('[sync] Erro ao ler/parsear teams.json:', err)
-    return
+    return { teams: 0, agents: 0 }
   }
 
   let teamsUpserted = 0
@@ -96,4 +104,6 @@ export async function syncTeamsFromConfig(): Promise<void> {
   console.log(
     `[sync] teams.json sincronizado: ${teamsUpserted} teams, ${agentsUpserted} agentes`
   )
+
+  return { teams: teamsUpserted, agents: agentsUpserted }
 }
