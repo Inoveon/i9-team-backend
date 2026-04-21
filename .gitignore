@@ -55,5 +55,5 @@ temp/
 test-results/
 playwright-report/
 
-# Uploads (storage local)
-uploads/
+# Uploads (storage local — apenas na raiz do repo, não o módulo src/modules/uploads/)
+/uploads/
