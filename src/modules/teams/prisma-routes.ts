@@ -6,6 +6,7 @@ import { config } from '../../config.js'
 import { listSessions, sendKeys } from '../tmux/service.js'
 import { startTeam, stopTeam } from './service.js'
 import { syncTeamsFromConfig } from './sync.js'
+import { resolveAttachment, renewAttachmentMtime } from '../uploads/routes.js'
 
 const teamCreateSchema = z.object({
   name: z.string().min(1).max(128),
@@ -20,17 +21,21 @@ const agentCreateSchema = z.object({
 
 /**
  * Mensagem enviada ao orquestrador de um team via `POST /teams/:id/message`.
+ *
  * Aceita `content` (nome oficial) ou `message` (compat com chamadas antigas do
- * frontend, ver app/team/[project]/[team]/page.tsx). Pelo menos um precisa vir.
+ * frontend) e, na Onda 5 (Issue #3), opcionalmente `attachmentIds` — UUIDs
+ * de imagens previamente enviadas via `POST /upload/image`. Pelo menos um
+ * entre mensagem/conteúdo/anexos precisa estar presente.
  */
 const messageSchema = z
   .object({
     content: z.string().min(1).optional(),
     message: z.string().min(1).optional(),
     agentId: z.string().optional(),
+    attachmentIds: z.array(z.string().uuid()).max(6).optional(),
   })
-  .refine((v) => !!(v.content ?? v.message), {
-    message: 'Campo "content" (ou "message") obrigatório',
+  .refine((v) => !!(v.content ?? v.message) || (v.attachmentIds?.length ?? 0) > 0, {
+    message: 'Informe "content"/"message" ou ao menos um "attachmentIds"',
   })
 
 /**
@@ -279,7 +284,19 @@ export async function teamsDbRoutes(app: FastifyInstance): Promise<void> {
   // Ações — envio de mensagem + start/stop
   // ──────────────────────────────────────────────────────────────────────
 
-  // POST /teams/:id/message — envia conteúdo à sessão tmux do orquestrador
+  // POST /teams/:id/message — envia conteúdo (e/ou anexos) à sessão tmux do
+  // agente alvo.
+  //
+  // Onda 5 (Issue #3): suporte a `attachmentIds`. Para cada UUID enviado:
+  //   - valida que o arquivo existe em UPLOAD_DIR/{teamIdDaURL}/{uuid}.ext
+  //     (ownership implícita — garante que anexos só sejam consumidos pelo
+  //     próprio team que os subiu)
+  //   - renova mtime para que o cleanup-worker não remova entre upload e uso
+  //   - monta o texto final no formato `@<absPath>` em linhas separadas, que
+  //     o Claude Code TUI reconhece como referência a imagem
+  //
+  // Se alguns IDs forem inválidos, o handler procede com os válidos e devolve
+  // 207 Multi-Status com `attachmentsRejected` listando motivos.
   app.post<{ Params: { id: string } }>(
     '/teams/:id/message',
     async (request, reply) => {
@@ -287,7 +304,7 @@ export async function teamsDbRoutes(app: FastifyInstance): Promise<void> {
       if (!parsed.success) {
         return reply.status(400).send({ error: parsed.error.flatten() })
       }
-      const content = parsed.data.content ?? parsed.data.message ?? ''
+      const textContent = parsed.data.content ?? parsed.data.message ?? ''
 
       const team = await prisma.team.findUnique({
         where: { id: request.params.id },
@@ -296,7 +313,7 @@ export async function teamsDbRoutes(app: FastifyInstance): Promise<void> {
       if (!team) return reply.status(404).send({ error: 'Team não encontrado' })
 
       // Se o caller especificou agentId, usa esse agente; senão, orquestrador.
-      let targetAgent = parsed.data.agentId
+      const targetAgent = parsed.data.agentId
         ? team.agents.find((a) => a.id === parsed.data.agentId)
         : team.agents.find((a) => a.role === 'orchestrator')
 
@@ -307,17 +324,72 @@ export async function teamsDbRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(400).send({ error: 'Agente não tem sessão tmux configurada' })
       }
 
+      // ── Resolução de anexos ────────────────────────────────────────────
+      const attachmentsUsed: Array<{ id: string; absPath: string; mimetype: string }> = []
+      const attachmentsRejected: Array<{ id: string; reason: 'not_found' }> = []
+
+      for (const attId of parsed.data.attachmentIds ?? []) {
+        const resolved = await resolveAttachment(team.id, attId)
+        if (!resolved) {
+          attachmentsRejected.push({ id: attId, reason: 'not_found' })
+          continue
+        }
+        await renewAttachmentMtime(resolved.absPath)
+        attachmentsUsed.push({ id: attId, absPath: resolved.absPath, mimetype: resolved.mimetype })
+      }
+
+      if ((parsed.data.attachmentIds?.length ?? 0) > 0 && attachmentsUsed.length === 0) {
+        // Mensagem que só tem anexos e TODOS falharam → 400 (não há o que enviar)
+        return reply.status(400).send({
+          error: 'Nenhum anexo válido e sem texto',
+          attachmentsRejected,
+        })
+      }
+
+      // ── Montagem do payload final para o tmux ─────────────────────────
+      // Formato:
+      //   <texto>
+      //   @<path1>
+      //   @<path2>
+      // O Claude Code reconhece `@<caminho absoluto>` como referência a
+      // arquivo/imagem. Duas quebras separam prosa de anexos para legibilidade.
+      const attachmentLines = attachmentsUsed.map((a) => `@${a.absPath}`)
+      const parts: string[] = []
+      if (textContent) parts.push(textContent)
+      if (attachmentLines.length > 0) parts.push(attachmentLines.join('\n'))
+      const payload = parts.join('\n\n')
+
       try {
-        sendKeys(targetAgent.sessionName, content)
+        sendKeys(targetAgent.sessionName, payload)
         request.log.info(
-          { session: targetAgent.sessionName, teamId: team.id, bytes: content.length },
+          {
+            session: targetAgent.sessionName,
+            teamId: team.id,
+            bytes: payload.length,
+            attachmentsUsed: attachmentsUsed.length,
+            attachmentsRejected: attachmentsRejected.length,
+          },
           '[teams/message] mensagem enviada'
         )
-        return { ok: true, session: targetAgent.sessionName, agent: targetAgent.name }
       } catch (err) {
         request.log.error({ err, session: targetAgent.sessionName }, '[teams/message] sendKeys falhou')
-        return reply.status(500).send({ error: 'Falha ao enviar tmux send-keys', detail: String(err) })
+        return reply
+          .status(500)
+          .send({ error: 'Falha ao enviar tmux send-keys', detail: String(err) })
       }
+
+      const body = {
+        ok: true,
+        session: targetAgent.sessionName,
+        agent: targetAgent.name,
+        attachmentsUsed: attachmentsUsed.map((a) => a.id),
+        attachmentsRejected,
+      }
+
+      // 207 Multi-Status se algum anexo foi rejeitado mas o envio seguiu;
+      // 200 caso contrário.
+      const status = attachmentsRejected.length > 0 ? 207 : 200
+      return reply.status(status).send(body)
     }
   )
 
