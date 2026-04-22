@@ -40,11 +40,15 @@ const THINKING_SPINNERS = /^[✻✶✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◑◒◓
 /** Verbo de thinking na linha */
 const THINKING_VERB_RE = /^[✻✶✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◑◒◓◌◍◎⣾⣽⣻⢿⡿⣟⣯⣷]\s+(.+?)(\s+for\s+(\d+s))?$/
 
-/** ⏺ Tool call: "⏺ NomeFerramenta(args...)" */
+/** ⏺ Tool call: "⏺ NomeFerramenta(args...)" — só aceita ⏺ (tool_call nunca usa ●) */
 const TOOL_CALL_RE = /^⏺\s+([A-Za-z_][A-Za-z0-9_]*)\((.*)$/
 
-/** ⏺ Claude text: "⏺ texto livre" (sem parênteses de ferramenta) */
-const CLAUDE_TEXT_RE = /^⏺\s+(.+)$/
+/**
+ * Claude text: "⏺ texto livre" OU "● texto livre".
+ * O Claude Code antigo usa ⏺ e o novo usa ● para respostas do assistant
+ * (frases corridas, sem parênteses de tool). Ambos valem como texto livre.
+ */
+const CLAUDE_TEXT_RE = /^[⏺●]\s+(.+)$/
 
 /** ⎿ Tool result: "  ⎿  conteúdo" */
 const TOOL_RESULT_RE = /^\s{2}⎿\s{2}(.*)$/
@@ -52,10 +56,25 @@ const TOOL_RESULT_RE = /^\s{2}⎿\s{2}(.*)$/
 /** ❯ User input */
 const USER_INPUT_RE = /^❯\s+(.+)$/
 
-/** Menu interativo: linha com ☐ ou ● (título) seguida de opções */
-const MENU_TITLE_RE = /^[☐●✔✗]\s+(.+)$/
-const MENU_OPTION_RE = /^\s*[❯○◉►●]\s+(.+)$/
-const MENU_NUMBERED_RE = /^\s*[❯○◉►]?\s*\d+[.)]\s+(.+)$/
+/**
+ * Menu interativo — heurística ESTRITA (pós-fix BUG #1, 2026-04-19).
+ *
+ * Problema resolvido: `●` é glifo ambíguo — é tanto bullet de claude_text
+ * (CLAUDE_TEXT_RE) quanto título/bullet de menu. Isso fazia prosa comum do
+ * orquestrador (`● Plano: 1. algo 2. outro`) ser classificada como menu.
+ *
+ * Regras:
+ *   - Título: SÓ ☐/✔/✗ (glifos exclusivos de menu, nunca aparecem em prosa).
+ *     `●` NÃO é mais aceito como título.
+ *   - Opção numerada: SÓ `N.` (ponto). `N)` em prosa ("1) foo, 2) bar") NÃO
+ *     é opção. Indent tolerante (\s*) porque menus reais do /model têm
+ *     itens 2+ indentados sem chevron.
+ *   - Opção bullet: SÓ `❯` (chevron de seleção). `●/○/◉/►` saíram.
+ *   - Fallback de "linha indentada sem glifo" foi removido.
+ */
+const MENU_TITLE_RE = /^[☐✔✗]\s+(.+)$/
+const MENU_OPTION_RE = /^\s*❯\s+(.+)$/
+const MENU_NUMBERED_RE = /^\s*\d+\.\s+(.+)$/
 
 /** Linhas que indicam fim de menu (footer de navegação) */
 const MENU_FOOTER_RE = /(Enter to (confirm|select|cancel)|Esc to (exit|cancel)|↑.{0,3}↓ to (navigate|select))/i
@@ -127,29 +146,46 @@ export function parseMessageStream(rawText: string): MessageEvent[] {
     }
 
     // ── Menu interativo ──────────────────────────────────────────────────────
-    // Detecta bloco: título (☐/●) + opções + footer
+    // Heurística ESTRITA (pós BUG #1, 2026-04-19). Exigências cumulativas:
+    //   1. Header com glifo EXCLUSIVO de menu (☐/✔/✗). `●` NÃO conta mais,
+    //      porque é ambíguo com CLAUDE_TEXT_RE e gerava falso-positivo em
+    //      respostas em prosa do orquestrador.
+    //   2. FOOTER presente nas próximas 15 linhas (Enter to confirm/select/…,
+    //      Esc to cancel, ↑↓ to navigate).
+    //   3. Pelo menos 2 opções com padrão ESTRITO — cada opção precisa de
+    //      um marcador explícito:
+    //        - `❯ conteúdo`   (chevron de seleção, possivelmente indentado), ou
+    //        - `N. conteúdo`  (número com PONTO, possivelmente indentado).
+    //      Linha "plaina" indentada SEM marcador NÃO é mais aceita como opção.
+    //
+    // Se qualquer condição falhar, cai pro resto do switch e a mesma linha
+    // pode virar claude_text via CLAUDE_TEXT_RE (que matcha ⏺ ou ●).
     if (MENU_TITLE_RE.test(trimmed)) {
-      const titleMatch = trimmed.match(MENU_TITLE_RE)
-      const title = titleMatch ? titleMatch[1].trim() : undefined
-      const options: string[] = []
-      i++
-      while (i < lines.length) {
-        const ol = lines[i].trim()
-        if (MENU_FOOTER_RE.test(ol)) { i++; break }
-        if (ol === '') { i++; continue }
-        const numbered = lines[i].match(MENU_NUMBERED_RE)
-        const bullet   = lines[i].match(MENU_OPTION_RE)
-        // Linha indentada sem bullet também é opção dentro de um bloco de menu
-        const indented = /^\s{2,}(\S.*)$/.exec(lines[i])
-        if (numbered) options.push(numbered[1].trim())
-        else if (bullet) options.push(bullet[1].trim())
-        else if (indented && !MENU_FOOTER_RE.test(ol)) options.push(indented[1].trim())
-        i++
+      const lookahead = lines.slice(i + 1, i + 16)
+      const footerRelIdx = lookahead.findIndex((l) => MENU_FOOTER_RE.test(l))
+
+      if (footerRelIdx !== -1) {
+        const body = lookahead.slice(0, footerRelIdx)
+        const options: string[] = []
+
+        for (const ol of body) {
+          if (ol.trim() === '') continue
+          const numbered = ol.match(MENU_NUMBERED_RE)
+          if (numbered) { options.push(numbered[1].trim()); continue }
+          const bullet = ol.match(MENU_OPTION_RE)
+          if (bullet)   { options.push(bullet[1].trim());   continue }
+          // Linha sem ❯ nem N. — NÃO é opção. Ignorada silenciosamente.
+        }
+
+        if (options.length >= 2) {
+          const titleMatch = trimmed.match(MENU_TITLE_RE)
+          const title = titleMatch ? titleMatch[1].trim() : undefined
+          events.push({ type: 'interactive_menu', options, ...(title ? { title } : {}) })
+          i += 1 + footerRelIdx + 1 // header + body + footer
+          continue
+        }
       }
-      if (options.length > 0) {
-        events.push({ type: 'interactive_menu', options, ...(title ? { title } : {}) })
-      }
-      continue
+      // Não é menu real — segue adiante sem continue.
     }
 
     // ── Tool result: "  ⎿  conteúdo" ────────────────────────────────────────

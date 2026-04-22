@@ -14,6 +14,7 @@ import { teamsDbRoutes } from './modules/teams/prisma-routes.js' // CRUD Prisma
 import { syncTeamsFromConfig } from './modules/teams/sync.js'   // sync teams.json → PostgreSQL
 import { wsHandler } from './modules/ws/handler.js'
 import { uploadsRoutes } from './modules/uploads/routes.js'
+import { notesRoutes } from './modules/notes/routes.js'
 import { startCleanupWorker, scheduleCleanupJob } from './modules/uploads/cleanup-worker.js'
 import { chatRoutes } from './modules/chat/routes.js'
 import { chatWsHandler } from './modules/chat/ws.js'
@@ -49,6 +50,7 @@ await app.register(async (instance) => {
   await instance.register(tmuxRoutes)
   await instance.register(teamsRoutes)
   await instance.register(teamsDbRoutes)
+  await instance.register(notesRoutes)
   await instance.register(wsHandler)
   await instance.register(uploadsRoutes)
   await instance.register(chatRoutes)

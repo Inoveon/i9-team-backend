@@ -1,47 +1,28 @@
 import { Worker, Queue } from 'bullmq'
-import { readdirSync, statSync, unlinkSync, existsSync, mkdirSync } from 'node:fs'
-import { config } from '../../config.js'
+import { cleanOnce } from './cleanup-logic.js'
 
-const UPLOAD_DIR = config.uploadDir
-const MAX_AGE_MS = 24 * 60 * 60 * 1000 // 24h
+const UPLOAD_DIR = process.env.UPLOAD_DIR ?? '/tmp/i9-team-uploads'
 
 const redisConnection = {
-  host: config.redisHost,
-  port: config.redisPort,
+  host: process.env.REDIS_HOST ?? 'localhost',
+  port: parseInt(process.env.REDIS_PORT ?? '6379', 10),
 }
 
 export const cleanupQueue = new Queue('cleanup-uploads', { connection: redisConnection })
 
 /**
- * Worker que remove uploads com mais de 24h — executa a cada 30min.
+ * Worker BullMQ — dispara `cleanOnce` a cada 30min (agendado em
+ * `scheduleCleanupJob`). Lógica de varredura está em `cleanup-logic.ts`
+ * (sem side effects de import, testável em isolado).
  */
 export function startCleanupWorker(): Worker {
   const worker = new Worker(
     'cleanup-uploads',
     async () => {
-      if (!existsSync(UPLOAD_DIR)) {
-        mkdirSync(UPLOAD_DIR, { recursive: true })
-        return
-      }
-
-      const now = Date.now()
-      const files = readdirSync(UPLOAD_DIR)
-      let removed = 0
-
-      for (const file of files) {
-        const filepath = `${UPLOAD_DIR}/${file}`
-        try {
-          const age = now - statSync(filepath).mtimeMs
-          if (age > MAX_AGE_MS) {
-            unlinkSync(filepath)
-            removed++
-          }
-        } catch {
-          // arquivo pode ter sido removido concorrentemente
-        }
-      }
-
-      console.log(`[cleanup-uploads] ${removed}/${files.length} arquivos removidos`)
+      const { removedFiles, scanned, removedDirs } = cleanOnce(UPLOAD_DIR)
+      console.log(
+        `[cleanup-uploads] scanned=${scanned} removedFiles=${removedFiles} removedDirs=${removedDirs}`
+      )
     },
     { connection: redisConnection }
   )
@@ -54,15 +35,13 @@ export function startCleanupWorker(): Worker {
   return worker
 }
 
-/**
- * Agenda o job recorrente a cada 30min.
- */
+/** Agenda o job recorrente a cada 30min. */
 export async function scheduleCleanupJob(): Promise<void> {
   await cleanupQueue.add(
     'cleanup',
     {},
     {
-      repeat: { every: 30 * 60 * 1000 }, // 30min
+      repeat: { every: 30 * 60 * 1000 },
       removeOnComplete: 10,
       removeOnFail: 5,
     }
