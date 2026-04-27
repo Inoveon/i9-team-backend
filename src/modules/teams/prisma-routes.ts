@@ -360,14 +360,25 @@ export async function teamsDbRoutes(app: FastifyInstance): Promise<void> {
       const payload = parts.join('\n\n')
 
       try {
-        // Fix portal-fix-attachment-enter: anexos `@<absPath>` disparam o
-        // file-picker autocomplete do CC TUI. Sem `closePickerBefore`, o Enter
-        // final é absorvido pelo picker e a mensagem fica pendurada no input.
-        // Quando há anexos, `sendKeys` envia `Escape + sleep 0.1 + Enter`
-        // antes do submit pra garantir que o picker feche primeiro.
-        sendKeys(targetAgent.sessionName, payload, {
-          closePickerBefore: attachmentsUsed.length > 0,
-        })
+        // REVERT portal-fix-enter-regression-critical (2026-04-27 17:54):
+        //
+        // O fix anterior (`closePickerBefore: attachmentsUsed.length > 0`)
+        // foi REVERTIDO porque o `Escape` antes do `Enter` final causou
+        // regressão crítica: em alguns estados do CC TUI (notadamente quando
+        // o file picker NÃO estava aberto), o Escape cancelava o input
+        // parcialmente digitado, deixando o prompt vazio — o Enter
+        // subsequente não submetia nada. User precisou usar Streamlit como
+        // workaround.
+        //
+        // Por enquanto voltamos ao comportamento legado: `sendKeys` envia
+        // só `Enter` ao final. Isso REINTRODUZ o bug original do file picker
+        // pendurado quando há `@<absPath>` no payload — aceito como issue
+        // conhecida temporária até termos detecção robusta de overlay
+        // aberto via capture-pane.
+        //
+        // A infra do flag `closePickerBefore` continua em `tmux/service.ts`
+        // pra futuras tentativas de fix.
+        sendKeys(targetAgent.sessionName, payload)
         request.log.info(
           {
             session: targetAgent.sessionName,
@@ -375,7 +386,6 @@ export async function teamsDbRoutes(app: FastifyInstance): Promise<void> {
             bytes: payload.length,
             attachmentsUsed: attachmentsUsed.length,
             attachmentsRejected: attachmentsRejected.length,
-            closePickerBefore: attachmentsUsed.length > 0,
           },
           '[teams/message] mensagem enviada'
         )
