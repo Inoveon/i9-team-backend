@@ -648,6 +648,59 @@ export async function sendKeysSerialized(
   return task
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// Teclas nomeadas (Up, Down, Enter, Escape, C-c, etc) — sem buffer/retry
+// Fix portal-ws-key-event (2026-04-27)
+//
+// Para navegação manual via Portal (botões ⬆ ⬇ ⏎ ⎋) e Terminal Mode. Não
+// passa pelo `sendKeys` normal (que faz Ctrl-U/mutex/retry/settle), pois
+// teclas nomeadas são instantâneas — não há "texto pendurado" que possa
+// acumular, e a resposta precisa ser imediata pra UI fluida.
+// ────────────────────────────────────────────────────────────────────────────
+
+/** Teclas nomeadas básicas aceitas em `key_event`. */
+const VALID_KEY_NAMES = new Set([
+  'Up', 'Down', 'Left', 'Right',
+  'Enter', 'Escape', 'Tab', 'Space',
+  'BSpace', 'BTab', 'Delete', 'Insert',
+  'Home', 'End', 'PageUp', 'PageDown',
+  'F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12',
+])
+
+/**
+ * Modificadores tmux: `C-` (Ctrl), `M-` (Meta/Alt), `S-` (Shift), em qualquer
+ * combinação, seguidos de um caractere alfanumérico ou nome especial.
+ *
+ * Exemplos válidos: `C-c`, `M-x`, `S-Tab`, `C-M-z`, `C-Up`, `S-F5`.
+ */
+const MODIFIER_KEY_RE =
+  /^[CMS](-[CMS])*-([a-zA-Z0-9]|Up|Down|Left|Right|Enter|Escape|Tab|Space|BSpace|F\d{1,2})$/
+
+/**
+ * Valida que `key` é uma tecla nomeada do tmux suportada (whitelist).
+ *
+ * Segurança: previne shell injection — sem isso, um caller poderia mandar
+ * `key: "Enter; rm -rf /"` e o `execSync` rodaria o comando inteiro.
+ */
+export function isValidKeyName(key: string): boolean {
+  if (typeof key !== 'string' || key.length === 0) return false
+  return VALID_KEY_NAMES.has(key) || MODIFIER_KEY_RE.test(key)
+}
+
+/**
+ * Envia tecla nomeada (Up, Down, Enter, Escape, C-c, etc) DIRETO via tmux,
+ * SEM buffer/Ctrl-U/retry. Pra navegação manual via Portal e Terminal Mode.
+ *
+ * Lança Error se `key` não passar na whitelist.
+ */
+export function sendKeyEvent(session: string, key: string): void {
+  if (!isValidKeyName(key)) {
+    throw new Error(`Tecla inválida: ${JSON.stringify(key)}`)
+  }
+  // `key` já foi whitelistado contra o regex acima — seguro inserir literal.
+  execSync(`tmux send-keys -t ${q(session)} ${key}`)
+}
+
 /** @deprecated use sendKeys */
 export function sendToSession(session: string, message: string): void {
   sendKeys(session, message)

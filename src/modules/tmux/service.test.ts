@@ -9,7 +9,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { sendKeys, isOverlayOpen, getInputBarText, __setExecForTests, __resetExecForTests } from './service.js'
+import { sendKeys, isOverlayOpen, getInputBarText, isValidKeyName, sendKeyEvent, __setExecForTests, __resetExecForTests } from './service.js'
 
 interface Call { command: string; input?: string }
 let calls: Call[]
@@ -524,5 +524,128 @@ ubuntu@host:~$ `)
 ────────────────────────────────────────────────────────────────────
 `)
     assert.equal(getInputBarText('s'), '')
+  })
+})
+
+describe('isValidKeyName — whitelist de teclas nomeadas (fix portal-ws-key-event)', () => {
+  it('aceita teclas nomeadas básicas: setas, Enter, Escape, Tab, Space', () => {
+    assert.equal(isValidKeyName('Up'), true)
+    assert.equal(isValidKeyName('Down'), true)
+    assert.equal(isValidKeyName('Left'), true)
+    assert.equal(isValidKeyName('Right'), true)
+    assert.equal(isValidKeyName('Enter'), true)
+    assert.equal(isValidKeyName('Escape'), true)
+    assert.equal(isValidKeyName('Tab'), true)
+    assert.equal(isValidKeyName('Space'), true)
+  })
+
+  it('aceita BSpace, BTab, Delete, Insert, Home, End, PageUp/Down', () => {
+    assert.equal(isValidKeyName('BSpace'), true)
+    assert.equal(isValidKeyName('BTab'), true)
+    assert.equal(isValidKeyName('Delete'), true)
+    assert.equal(isValidKeyName('Insert'), true)
+    assert.equal(isValidKeyName('Home'), true)
+    assert.equal(isValidKeyName('End'), true)
+    assert.equal(isValidKeyName('PageUp'), true)
+    assert.equal(isValidKeyName('PageDown'), true)
+  })
+
+  it('aceita F1 a F12', () => {
+    for (let i = 1; i <= 12; i++) {
+      assert.equal(isValidKeyName(`F${i}`), true, `F${i} deveria ser válida`)
+    }
+  })
+
+  it('aceita modificadores Ctrl/Meta/Shift sozinhos e combinados', () => {
+    assert.equal(isValidKeyName('C-c'), true)
+    assert.equal(isValidKeyName('M-x'), true)
+    assert.equal(isValidKeyName('S-Tab'), true)
+    assert.equal(isValidKeyName('C-M-z'), true)
+    assert.equal(isValidKeyName('C-Up'), true)
+    assert.equal(isValidKeyName('S-F5'), true)
+    assert.equal(isValidKeyName('C-S-M-Enter'), true)
+  })
+
+  it('rejeita injection / texto livre', () => {
+    assert.equal(isValidKeyName('rm -rf /'), false)
+    assert.equal(isValidKeyName('"abc"'), false)
+    assert.equal(isValidKeyName('hello world'), false)
+    assert.equal(isValidKeyName(''), false)
+    assert.equal(isValidKeyName('Enter; rm -rf /'), false)
+    assert.equal(isValidKeyName('$(whoami)'), false)
+    assert.equal(isValidKeyName('`ls`'), false)
+    assert.equal(isValidKeyName('Up\nDown'), false)
+  })
+
+  it('rejeita inputs não-string ou nulos (defensive)', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    assert.equal(isValidKeyName(null as any), false)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    assert.equal(isValidKeyName(undefined as any), false)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    assert.equal(isValidKeyName(123 as any), false)
+  })
+})
+
+describe('sendKeyEvent — envio direto sem buffer/retry', () => {
+  let calls: Array<{ command: string }>
+
+  function spy(): void {
+    calls = []
+    __setExecForTests((cmd: string) => {
+      calls.push({ command: cmd })
+      return ''
+    })
+  }
+
+  // afterEach pra limpar
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  function reset(): void {
+    __resetExecForTests()
+  }
+
+  it('Up → 1 execSync `tmux send-keys -t SESSION Up` (SEM Ctrl-U/Escape/sleep)', () => {
+    spy()
+    sendKeyEvent('my-session', 'Up')
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].command, `tmux send-keys -t "my-session" Up`)
+    reset()
+  })
+
+  it('Enter → SEM `Ctrl-U` (diferente de sendKeys normal)', () => {
+    spy()
+    sendKeyEvent('s', 'Enter')
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].command, `tmux send-keys -t "s" Enter`)
+    reset()
+  })
+
+  it('C-c (Ctrl+C) → comando válido', () => {
+    spy()
+    sendKeyEvent('s', 'C-c')
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].command, `tmux send-keys -t "s" C-c`)
+    reset()
+  })
+
+  it('tecla inválida → throw, ZERO execSync', () => {
+    spy()
+    assert.throws(() => sendKeyEvent('s', 'rm -rf /'), /Tecla inválida/)
+    assert.equal(calls.length, 0, 'NÃO deve chamar tmux com tecla inválida')
+    reset()
+  })
+
+  it('tentativa de injection com `;` → throw', () => {
+    spy()
+    assert.throws(() => sendKeyEvent('s', 'Enter; rm -rf /'), /Tecla inválida/)
+    assert.equal(calls.length, 0)
+    reset()
+  })
+
+  it('nome de sessão com espaço → envelopa em aspas', () => {
+    spy()
+    sendKeyEvent('sessao com espaco', 'Tab')
+    assert.equal(calls[0].command, `tmux send-keys -t "sessao com espaco" Tab`)
+    reset()
   })
 })
