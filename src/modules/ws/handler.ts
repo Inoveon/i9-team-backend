@@ -43,15 +43,17 @@ function startPing(socket: WebSocket): NodeJS.Timeout {
 
 export async function wsHandler(app: FastifyInstance) {
   /**
-   * WebSocket canônico — protocolo de mensagens:
+   * WebSocket canônico — protocolo de mensagens (cleanup v1, 2026-04-27):
    *   cliente → { type: "subscribe",     session: string, resumeFromSeq?: number }
    *   cliente → { type: "input",         keys: string }
    *   cliente → { type: "select_option", session: string, value: string, currentIndex?: number }
-   *   server  → { type: "subscribed",    session, reset, headSeq, events }
-   *   server  → { type: "output",        session, data, hasMenu }
+   *   server  → { type: "subscribed",    session, reset, headSeq, events }   // events sempre []
+   *   server  → { type: "output",        session, data, hasMenu }            // snapshot bruto pro xterm.js
    *   server  → { type: "interactive_menu", session, menuType, options, currentIndex }
-   *   server  → { type: "message_stream",  session, events, headSeq }
    *   server  → { type: "error",         message }
+   *
+   * REMOVIDO no cleanup v1: `message_stream`. O parser parseMessageStream
+   * sobrevive APENAS no endpoint debug `GET /debug/parse-stream` abaixo.
    */
   app.get('/ws', { websocket: true }, (socket) => {
     let currentSession = ''

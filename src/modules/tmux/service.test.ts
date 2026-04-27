@@ -192,3 +192,73 @@ describe('sendKeys — modo inválido cai no default "keys"', () => {
     assert.equal(calls[1].command, `tmux send-keys -t "s" S-Enter`)
   })
 })
+
+describe('sendKeys — closePickerBefore (fix portal-fix-attachment-enter)', () => {
+  beforeEach(() => {
+    installSpy()
+    delete process.env.TMUX_MULTILINE_MODE
+  })
+  afterEach(() => uninstallSpy())
+
+  it('single-line + closePickerBefore=true: -l <texto> + Escape + sleep + Enter', () => {
+    sendKeys('s', 'oi', { closePickerBefore: true })
+    assert.equal(calls.length, 4)
+    assert.equal(calls[0].command, `tmux send-keys -t "s" -l "oi"`)
+    assert.equal(calls[1].command, `tmux send-keys -t "s" Escape`)
+    assert.equal(calls[2].command, `sleep 0.1`)
+    assert.equal(calls[3].command, `tmux send-keys -t "s" Enter`)
+  })
+
+  it('multilinha keys + closePickerBefore=true: substitui o Enter final por Escape+Enter', () => {
+    // Cenário real do bug: payload = "<texto>\n\n@<absPath>"
+    sendKeys('s', 'texto\n\n@/tmp/x.png', { closePickerBefore: true })
+    assert.equal(calls.length, 7)
+    assert.deepEqual(
+      calls.map((c) => c.command),
+      [
+        `tmux send-keys -t "s" -l "texto"`,
+        `tmux send-keys -t "s" S-Enter`,
+        `tmux send-keys -t "s" S-Enter`,
+        `tmux send-keys -t "s" -l "@/tmp/x.png"`,
+        `tmux send-keys -t "s" Escape`,
+        `sleep 0.1`,
+        `tmux send-keys -t "s" Enter`,
+      ]
+    )
+  })
+
+  it('multilinha paste + closePickerBefore=true: load-buffer + paste + Escape + sleep + Enter', () => {
+    process.env.TMUX_MULTILINE_MODE = 'paste'
+    sendKeys('s', 'a\nb', { closePickerBefore: true })
+    assert.equal(calls.length, 5)
+    assert.equal(calls[0].command, `tmux load-buffer -`)
+    assert.equal(calls[1].command, `tmux paste-buffer -t "s" -p`)
+    assert.equal(calls[2].command, `tmux send-keys -t "s" Escape`)
+    assert.equal(calls[3].command, `sleep 0.1`)
+    assert.equal(calls[4].command, `tmux send-keys -t "s" Enter`)
+    delete process.env.TMUX_MULTILINE_MODE
+  })
+
+  it('flat + closePickerBefore=true: -l <flat> + Escape + sleep + Enter', () => {
+    process.env.TMUX_MULTILINE_MODE = 'flat'
+    sendKeys('s', 'a\nb', { closePickerBefore: true })
+    assert.equal(calls.length, 4)
+    assert.equal(calls[0].command, `tmux send-keys -t "s" -l "a b"`)
+    assert.equal(calls[1].command, `tmux send-keys -t "s" Escape`)
+    assert.equal(calls[2].command, `sleep 0.1`)
+    assert.equal(calls[3].command, `tmux send-keys -t "s" Enter`)
+    delete process.env.TMUX_MULTILINE_MODE
+  })
+
+  it('default (sem opts) preserva comportamento legado — sem Escape', () => {
+    sendKeys('s', 'oi')
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].command, `tmux send-keys -t "s" "oi" Enter`)
+  })
+
+  it('closePickerBefore=false explícito também preserva legado', () => {
+    sendKeys('s', 'a\nb', { closePickerBefore: false })
+    assert.equal(calls.length, 4)
+    assert.equal(calls[3].command, `tmux send-keys -t "s" Enter`)
+  })
+})

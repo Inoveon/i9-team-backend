@@ -104,9 +104,32 @@ function q(s: string): string {
   return JSON.stringify(s)
 }
 
+/**
+ * Fecha autocomplete/file-picker do CC TUI antes do Enter final, quando
+ * solicitado pelo caller (ex: payload com `@<absPath>` que dispara o file
+ * picker do Claude Code). Veja `SendKeysOptions.closePickerBefore`.
+ *
+ * Sem o `Escape`, o Enter pode ser absorvido pelo picker — a mensagem fica
+ * pendurada no input e o próximo input do usuário também é desviado.
+ *
+ * O pequeno sleep entre Escape e Enter dá tempo da UI processar o close
+ * antes do submit. 0.1s foi suficiente em testes empíricos com CC v2.1.120.
+ */
+function sendEscapeAndEnter(s: string): void {
+  execSync(`tmux send-keys -t ${s} Escape`)
+  execSync(`sleep 0.1`)
+  execSync(`tmux send-keys -t ${s} Enter`)
+}
+
 /** Envio single-line (sem `\n`). Mantém o comportamento anterior byte-a-byte. */
-function sendKeysSingleLine(session: string, keys: string): void {
-  execSync(`tmux send-keys -t ${q(session)} ${q(keys)} Enter`)
+function sendKeysSingleLine(session: string, keys: string, closePickerBefore: boolean): void {
+  const s = q(session)
+  if (closePickerBefore) {
+    if (keys.length > 0) execSync(`tmux send-keys -t ${s} -l ${q(keys)}`)
+    sendEscapeAndEnter(s)
+    return
+  }
+  execSync(`tmux send-keys -t ${s} ${q(keys)} Enter`)
 }
 
 /**
@@ -122,7 +145,7 @@ function sendKeysSingleLine(session: string, keys: string): void {
  * Linhas vazias são tratadas emitindo apenas o `S-Enter` (pula `-l` com
  * string vazia, que tmux rejeita).
  */
-function sendKeysMultilineKeys(session: string, keys: string): void {
+function sendKeysMultilineKeys(session: string, keys: string, closePickerBefore: boolean): void {
   const s = q(session)
   const lines = keys.split('\n')
   for (let i = 0; i < lines.length; i++) {
@@ -134,27 +157,52 @@ function sendKeysMultilineKeys(session: string, keys: string): void {
       execSync(`tmux send-keys -t ${s} S-Enter`)
     }
   }
-  execSync(`tmux send-keys -t ${s} Enter`)
+  if (closePickerBefore) sendEscapeAndEnter(s)
+  else execSync(`tmux send-keys -t ${s} Enter`)
 }
 
 /**
  * Envio multilinha via Estratégia D — fallback bracketed paste.
  * Preserva newlines como LF reais dentro de ESC[200~...ESC[201~.
  */
-function sendKeysMultilinePaste(session: string, keys: string): void {
+function sendKeysMultilinePaste(session: string, keys: string, closePickerBefore: boolean): void {
   const s = q(session)
   execSync(`tmux load-buffer -`, { input: keys })
   execSync(`tmux paste-buffer -t ${s} -p`)
-  execSync(`tmux send-keys -t ${s} Enter`)
+  if (closePickerBefore) sendEscapeAndEnter(s)
+  else execSync(`tmux send-keys -t ${s} Enter`)
 }
 
 /**
  * Envio multilinha flat — substitui `\n` por espaço. Degrada UX mas garante
  * compatibilidade em qualquer terminal.
  */
-function sendKeysFlat(session: string, keys: string): void {
+function sendKeysFlat(session: string, keys: string, closePickerBefore: boolean): void {
   const flat = keys.replace(/\n+/g, ' ').trim()
-  execSync(`tmux send-keys -t ${q(session)} ${q(flat)} Enter`)
+  const s = q(session)
+  if (closePickerBefore) {
+    if (flat.length > 0) execSync(`tmux send-keys -t ${s} -l ${q(flat)}`)
+    sendEscapeAndEnter(s)
+    return
+  }
+  execSync(`tmux send-keys -t ${s} ${q(flat)} Enter`)
+}
+
+export interface SendKeysOptions {
+  /**
+   * Quando `true`, envia `Escape` antes do `Enter` final pra fechar
+   * autocompletes/file-pickers do CC TUI (notavelmente o que abre ao digitar
+   * `@<absPath>`). Se o picker estiver aberto, o Enter sem Escape antes é
+   * absorvido pelo widget — a mensagem fica pendurada no input.
+   *
+   * Default `false`: preserva comportamento legado de TODOS os callers
+   * existentes (ws/handler input do terminal cru, menus interativos, etc).
+   * Caller que envia anexos `@<path>` (ex: `teams/prisma-routes.ts` na rota
+   * POST /teams/:id/message) deve passar `true`.
+   *
+   * Fix: portal-fix-attachment-enter (2026-04-27).
+   */
+  closePickerBefore?: boolean
 }
 
 /**
@@ -162,24 +210,27 @@ function sendKeysFlat(session: string, keys: string): void {
  * Suporta multilinha quando `keys` contém `\n` (ver `TMUX_MULTILINE_MODE`).
  *
  * Fast-path: texto sem `\n` sempre usa uma única chamada execSync,
- * independente do modo configurado.
+ * independente do modo configurado (exceto quando `closePickerBefore=true`,
+ * que sempre usa `-l` + `Escape` + `Enter`).
  */
-export function sendKeys(session: string, keys: string): void {
+export function sendKeys(session: string, keys: string, opts: SendKeysOptions = {}): void {
+  const closePickerBefore = !!opts.closePickerBefore
+
   if (!keys.includes('\n')) {
-    sendKeysSingleLine(session, keys)
+    sendKeysSingleLine(session, keys, closePickerBefore)
     return
   }
 
   const mode = resolveMode()
   switch (mode) {
     case 'keys':
-      sendKeysMultilineKeys(session, keys)
+      sendKeysMultilineKeys(session, keys, closePickerBefore)
       return
     case 'paste':
-      sendKeysMultilinePaste(session, keys)
+      sendKeysMultilinePaste(session, keys, closePickerBefore)
       return
     case 'flat':
-      sendKeysFlat(session, keys)
+      sendKeysFlat(session, keys, closePickerBefore)
       return
   }
 }
