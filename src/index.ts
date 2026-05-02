@@ -18,6 +18,11 @@ import { notesRoutes } from './modules/notes/routes.js'
 import { startCleanupWorker, scheduleCleanupJob } from './modules/uploads/cleanup-worker.js'
 import { chatRoutes } from './modules/chat/routes.js'
 import { chatWsHandler } from './modules/chat/ws.js'
+import { bridgeRoutes } from './modules/bridge/routes.js'
+import { bridgeProxy } from './modules/bridge/proxy.js'
+import { rcRoutes } from './modules/rc/routes.js'
+import { contextRoutes } from './modules/context/routes.js'
+import { auditRoutes } from './modules/audit/routes.js'
 
 const app = Fastify({ logger: true })
 
@@ -55,6 +60,11 @@ await app.register(async (instance) => {
   await instance.register(uploadsRoutes)
   await instance.register(chatRoutes)
   await instance.register(chatWsHandler)
+  await instance.register(bridgeRoutes)
+  await instance.register(bridgeProxy)
+  await instance.register(rcRoutes)
+  await instance.register(contextRoutes)
+  await instance.register(auditRoutes)
 })
 
 app.get('/health', async () => ({ status: 'ok', ts: Date.now() }))

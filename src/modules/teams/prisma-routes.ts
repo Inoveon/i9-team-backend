@@ -172,38 +172,6 @@ export async function teamsDbRoutes(app: FastifyInstance): Promise<void> {
     return reply.status(201).send({ team })
   })
 
-  // GET /teams/:project/:team — busca team por project/name (ex: i9-team/dev)
-  // Retorna objeto Team no formato esperado pelo frontend (project + name separados)
-  app.get<{ Params: { project: string; team: string } }>(
-    '/teams/:project/:team',
-    async (request, reply) => {
-      const { project, team } = request.params
-      const fullName = `${project}/${team}`
-      const raw = await prisma.team.findFirst({
-        where: { name: fullName },
-        include: { agents: true },
-      })
-      if (!raw) return reply.status(404).send({ error: 'Team não encontrado' })
-      const activeSessions = new Set(listSessions().map((s) => s.name))
-      return {
-        id: raw.id,
-        project,
-        name: team,
-        description: raw.description,
-        status: raw.agents.length > 0 ? 'running' : 'stopped',
-        agents: raw.agents.map((a) => ({
-          id: a.id,
-          name: a.name,
-          role: a.role === 'orchestrator' ? 'orchestrator' : 'worker',
-          status: a.sessionName && activeSessions.has(a.sessionName) ? 'running' : 'stopped',
-          sessionId: a.sessionName,
-        })),
-        createdAt: raw.createdAt,
-        updatedAt: raw.createdAt,
-      }
-    }
-  )
-
   // GET /teams/:id — busca team por ID
   app.get<{ Params: { id: string } }>('/teams/:id', async (request, reply) => {
     const team = await prisma.team.findUnique({

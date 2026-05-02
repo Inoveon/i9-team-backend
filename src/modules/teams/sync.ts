@@ -78,11 +78,9 @@ export async function syncTeamsFromConfig(): Promise<SyncResult> {
         const isOrchestrator = agent.name === team.orchestrator
         const role = isOrchestrator ? 'orchestrator' : 'agent'
 
-        // Convenção de nome de sessão tmux:
-        //   orquestrador → projeto-team-orquestrador
-        //   agente       → projeto-team-nome-do-agente
-        const sessionSuffix = isOrchestrator ? 'orquestrador' : agent.name
-        const sessionName = `${project.name}-${team.name}-${sessionSuffix}`
+        // Convenção de nome de sessão tmux: projeto-team-nome-do-agente
+        // Igual ao padrão do team.sh (usa o name do agente, sem alias)
+        const sessionName = `${project.name}-${team.name}-${agent.name}`
 
         await prisma.agent.upsert({
           where: {

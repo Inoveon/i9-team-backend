@@ -11,6 +11,7 @@
  */
 import type { FastifyInstance } from 'fastify'
 import type { WebSocket } from 'ws'
+import { execSync } from 'node:child_process'
 import { sendKeys } from '../tmux/service.js'
 import { parseMessageStream } from './parseMessageStream.js'
 import { captureSession } from '../tmux/service.js'
@@ -23,8 +24,9 @@ const PING_INTERVAL_MS = 30_000
 interface SubscribeMsg    { type: 'subscribe';     session: string; resumeFromSeq?: number }
 interface InputMsg        { type: 'input';          keys: string }
 interface SelectOptionMsg { type: 'select_option'; session: string; value: string; currentIndex?: number }
+interface ResizeMsg        { type: 'resize';        cols: number; rows: number }
 
-type ClientMsg = SubscribeMsg | InputMsg | SelectOptionMsg
+type ClientMsg = SubscribeMsg | InputMsg | SelectOptionMsg | ResizeMsg
 
 /**
  * Anexa keep-alive ping ao socket. Retorna o timer para cleanup.
@@ -86,6 +88,15 @@ export async function wsHandler(app: FastifyInstance) {
         const idx = parseInt(msg.value, 10)
         const cur = (msg as SelectOptionMsg).currentIndex ?? 1
         if (!isNaN(idx)) selectMenuOption(msg.session, idx, cur)
+        return
+      }
+
+      if (msg.type === 'resize' && currentSession) {
+        const { cols, rows } = msg as ResizeMsg
+        try {
+
+          execSync(`tmux resize-window -t ${currentSession} -x ${cols} -y ${rows}`, { stdio: 'ignore' })
+        } catch { /* sessão pode não existir */ }
         return
       }
 
