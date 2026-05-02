@@ -166,6 +166,34 @@ export async function uploadsRoutes(app: FastifyInstance): Promise<void> {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// POST /upload/screenshot — salva base64 dataUrl em /tmp/screenshot-{ts}.png
+// Usado pelo terminal input para que o agente acesse a imagem no disco.
+// ────────────────────────────────────────────────────────────────────────────
+
+export async function screenshotRoutes(app: FastifyInstance): Promise<void> {
+  app.post('/upload/screenshot', async (request, reply) => {
+    const { dataUrl } = request.body as { dataUrl?: string }
+    if (!dataUrl || !dataUrl.startsWith('data:image/')) {
+      return reply.status(400).send({ error: 'dataUrl de imagem obrigatório' })
+    }
+
+    // Extrai extensão e bytes do data URL
+    const mimeMatch = dataUrl.match(/^data:(image\/\w+);base64,/)
+    if (!mimeMatch) return reply.status(400).send({ error: 'dataUrl inválido' })
+    const mime = mimeMatch[1]
+    const ext = MIME_TO_EXT[mime] ?? '.png'
+    const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1)
+    const buffer = Buffer.from(base64, 'base64')
+
+    const filename = `screenshot-${Date.now()}${ext}`
+    const path = `/tmp/${filename}`
+    await (await import('node:fs/promises')).writeFile(path, buffer)
+
+    return reply.status(201).send({ path, filename })
+  })
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Helpers exportados para uso pelo handler de /teams/:id/message
 // ────────────────────────────────────────────────────────────────────────────
 
