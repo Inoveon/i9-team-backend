@@ -171,7 +171,7 @@ export async function uploadsRoutes(app: FastifyInstance): Promise<void> {
 // ────────────────────────────────────────────────────────────────────────────
 
 export async function screenshotRoutes(app: FastifyInstance): Promise<void> {
-  app.post('/upload/screenshot', async (request, reply) => {
+  app.post('/upload/screenshot', { bodyLimit: 15 * 1024 * 1024 }, async (request, reply) => {
     const { dataUrl } = request.body as { dataUrl?: string }
     if (!dataUrl || !dataUrl.startsWith('data:image/')) {
       return reply.status(400).send({ error: 'dataUrl de imagem obrigatório' })
