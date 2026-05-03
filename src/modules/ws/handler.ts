@@ -47,13 +47,20 @@ export async function wsHandler(app: FastifyInstance) {
   /**
    * WebSocket canônico — protocolo de mensagens:
    *   cliente → { type: "subscribe",     session: string, resumeFromSeq?: number }
-   *   cliente → { type: "input",         keys: string }
+   *   cliente → { type: "input",         keys: string }                               // texto via input bar (com Ctrl-U/retry)
+   *   cliente → { type: "key_event",     key: "Up"|"Down"|"Enter"|"Escape"|"C-c"|... } // tecla nomeada DIRETA
    *   cliente → { type: "select_option", session: string, value: string, currentIndex?: number }
-   *   server  → { type: "subscribed",    session, reset, headSeq, events }
-   *   server  → { type: "output",        session, data, hasMenu }
+   *   server  → { type: "subscribed",    session, reset, headSeq, events }   // events sempre []
+   *   server  → { type: "output",        session, data, hasMenu }            // snapshot bruto pro xterm.js
    *   server  → { type: "interactive_menu", session, menuType, options, currentIndex }
-   *   server  → { type: "message_stream",  session, events, headSeq }
    *   server  → { type: "error",         message }
+   *
+   * `key_event` (portal-ws-key-event 2026-04-27): pra navegação manual
+   * (botões ⬆ ⬇ ⏎ ⎋) e Terminal Mode. Whitelistado (anti-injection); SEM
+   * Ctrl-U/mutex/retry — resposta imediata.
+   *
+   * REMOVIDO no cleanup v1: `message_stream`. O parser parseMessageStream
+   * sobrevive APENAS no endpoint debug `GET /debug/parse-stream` abaixo.
    */
   app.get('/ws', { websocket: true }, (socket) => {
     let currentSession = ''
@@ -81,6 +88,22 @@ export async function wsHandler(app: FastifyInstance) {
       if (msg.type === 'input' && msg.keys && currentSession) {
         console.log(`[ws] sendKeys session=${currentSession} bytes=${msg.keys.length}`)
         sendKeys(currentSession, msg.keys)
+        return
+      }
+
+      if (msg.type === 'key_event' && msg.key && currentSession) {
+        try {
+          sendKeyEvent(currentSession, msg.key)
+          console.log(`[ws] key_event session=${currentSession} key=${msg.key}`)
+        } catch (err) {
+          socket.send(
+            JSON.stringify({
+              type: 'error',
+              message: `Tecla inválida: ${msg.key}`,
+            })
+          )
+          console.warn(`[ws] key_event REJECTED session=${currentSession} key=${msg.key} err=${String(err)}`)
+        }
         return
       }
 
@@ -142,6 +165,19 @@ export async function wsHandler(app: FastifyInstance) {
         if (msg.type === 'input' && msg.keys) {
           console.log(`[ws/:session] sendKeys session=${session} bytes=${msg.keys.length}`)
           sendKeys(session, msg.keys)
+          return
+        }
+
+        if (msg.type === 'key_event' && msg.key) {
+          try {
+            sendKeyEvent(session, msg.key)
+            console.log(`[ws/:session] key_event session=${session} key=${msg.key}`)
+          } catch (err) {
+            socket.send(
+              JSON.stringify({ type: 'error', message: `Tecla inválida: ${msg.key}` })
+            )
+            console.warn(`[ws/:session] key_event REJECTED session=${session} key=${msg.key} err=${String(err)}`)
+          }
           return
         }
 

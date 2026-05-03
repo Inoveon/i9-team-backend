@@ -1,9 +1,11 @@
 import type { FastifyInstance } from 'fastify'
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs'
+import { readFile, stat } from 'node:fs/promises'
+import { resolve as pathResolve } from 'node:path'
 import { z } from 'zod'
 import { prisma } from '../../lib/prisma.js'
 import { config } from '../../config.js'
-import { listSessions, sendKeys } from '../tmux/service.js'
+import { listSessions, sendKeysSerialized, isOverlayOpen } from '../tmux/service.js'
 import { startTeam, stopTeam } from './service.js'
 import { syncTeamsFromConfig } from './sync.js'
 import { resolveAttachment, renewAttachmentMtime } from '../uploads/routes.js'
@@ -281,6 +283,86 @@ export async function teamsDbRoutes(app: FastifyInstance): Promise<void> {
   })
 
   // ──────────────────────────────────────────────────────────────────────
+  // GET /teams/:teamId/agents/:name/context
+  // Lê o agent-context (.memory/teams/<team>/agent-context/<name>.md) do
+  // filesystem do projeto e retorna como JSON.
+  // Fix: portal-context-endpoint-and-enter-escalation (2026-04-27).
+  // ──────────────────────────────────────────────────────────────────────
+  app.get<{ Params: { teamId: string; name: string } }>(
+    '/teams/:teamId/agents/:name/context',
+    async (request, reply) => {
+      const { teamId, name } = request.params
+
+      // 1. Resolver project_root + team_name a partir do teamId
+      const team = await prisma.team.findUnique({ where: { id: teamId } })
+      if (!team) return reply.status(404).send({ error: 'Team não encontrado' })
+
+      // team.name está no formato "<project>/<team_name>"
+      const [projectName, teamName] = team.name.split('/')
+      if (!projectName || !teamName) {
+        return reply
+          .status(500)
+          .send({ error: `Team com nome em formato inválido: ${team.name}` })
+      }
+
+      // 2. Resolver project_root via teams.json
+      const teamsJsonPath = config.teamsJsonPath
+      if (!teamsJsonPath) {
+        return reply.status(500).send({ error: 'TEAMS_JSON_PATH não configurado' })
+      }
+
+      let teamsJson: { projects?: Array<{ name?: string; root?: string }> }
+      try {
+        const raw = await readFile(teamsJsonPath, 'utf-8')
+        teamsJson = JSON.parse(raw)
+      } catch (err) {
+        return reply
+          .status(500)
+          .send({ error: `Falha ao ler teams.json: ${String(err)}` })
+      }
+
+      const project = teamsJson.projects?.find((p) => p.name === projectName)
+      if (!project?.root) {
+        return reply
+          .status(404)
+          .send({ error: `Project '${projectName}' não encontrado em teams.json ou sem 'root'` })
+      }
+
+      // 3. Montar path do agent-context
+      const contextPath = pathResolve(
+        project.root,
+        '.memory',
+        'teams',
+        teamName,
+        'agent-context',
+        `${name}.md`
+      )
+
+      // 4. Ler arquivo (graceful fallback quando não existe)
+      try {
+        const [content, stats] = await Promise.all([
+          readFile(contextPath, 'utf-8'),
+          stat(contextPath),
+        ])
+        return {
+          markdown: content,
+          lastUpdate: stats.mtime.toISOString(),
+          exists: true,
+          path: contextPath,
+        }
+      } catch {
+        // Arquivo não existe ou erro de leitura — retorna placeholder
+        return {
+          markdown: `# ${name}\n\n_Sem contexto criado ainda — esse agente nunca atualizou seu agent-context._\n\n**Path esperado:** \`${contextPath}\``,
+          lastUpdate: new Date(0).toISOString(),
+          exists: false,
+          path: contextPath,
+        }
+      }
+    }
+  )
+
+  // ──────────────────────────────────────────────────────────────────────
   // Ações — envio de mensagem + start/stop
   // ──────────────────────────────────────────────────────────────────────
 
@@ -360,7 +442,45 @@ export async function teamsDbRoutes(app: FastifyInstance): Promise<void> {
       const payload = parts.join('\n\n')
 
       try {
-        sendKeys(targetAgent.sessionName, payload)
+        // Fix portal-fix-anexo-capture-pane-v1 (2026-04-27 18:10):
+        //
+        // Detecção robusta do overlay (file picker, slash picker, menu) via
+        // `isOverlayOpen` ANTES de decidir o `closePickerBefore`. Combina
+        // duas heurísticas:
+        //
+        //   1. `hasAttachmentInPayload` — antecipa que `@<absPath>` no
+        //      payload VAI abrir file picker quando digitado, mesmo que o
+        //      capture-pane atual mostre estado limpo.
+        //   2. `overlayAlreadyOpen` — cobre estado weird (picker preso de
+        //      teste anterior, autocomplete pendurado, menu não-fechado).
+        //
+        // Quando NENHUMA das duas, mantém comportamento legado (Enter direto)
+        // — sem regressão pra mensagens texto-only normais.
+        //
+        // Histórico:
+        //   - portal-fix-attachment-enter (b04be78): sempre Escape se anexo
+        //     → causou regressão por efeitos residuais quando picker não
+        //     estava aberto.
+        //   - portal-fix-enter-regression-critical: revert pra sem Escape.
+        //   - este fix (v1): Escape SÓ se overlay realmente aberto OU se vai
+        //     abrir pelo `@path`.
+        const hasAttachmentInPayload = attachmentLines.length > 0
+        const overlayAlreadyOpen = isOverlayOpen(targetAgent.sessionName)
+        const closePickerBefore = hasAttachmentInPayload || overlayAlreadyOpen
+
+        // sendKeysSerialized: fila por sessão (anti-race) + settle wait
+        // pós-Enter (anti-render-lag) + log estruturado com correlationId.
+        // Substituiu o `sendKeys` síncrono direto no
+        // portal-investigate-enter-intermittent (2026-04-27).
+        const report = await sendKeysSerialized(
+          targetAgent.sessionName,
+          payload,
+          { closePickerBefore }
+        )
+        // Sinal MAIS CONFIÁVEL de submit-falhou: input bar com texto
+        // pendurado pós-send (detectado em portal-investigate-enter-real-logs
+        // 2026-04-27 — superou o `overlayAfter` que tinha falso negativo).
+        const submitFailed = report.inputPendingAfter.length > 0
         request.log.info(
           {
             session: targetAgent.sessionName,
@@ -368,6 +488,17 @@ export async function teamsDbRoutes(app: FastifyInstance): Promise<void> {
             bytes: payload.length,
             attachmentsUsed: attachmentsUsed.length,
             attachmentsRejected: attachmentsRejected.length,
+            hasAttachmentInPayload,
+            overlayAlreadyOpen,
+            closePickerBefore,
+            correlationId: report.correlationId,
+            overlayAfter: report.overlayAfter,
+            inputPendingAfter: report.inputPendingAfter.slice(0, 80),
+            retryApplied: report.retryApplied,
+            retryResolved: report.retryResolved,
+            bufferCleared: report.bufferCleared,
+            durationMs: report.durationMs,
+            suspicious: submitFailed || report.overlayAfter,
           },
           '[teams/message] mensagem enviada'
         )

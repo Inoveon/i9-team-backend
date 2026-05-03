@@ -1,5 +1,5 @@
 export const config = {
-  port: parseInt(process.env.PORT ?? '4020', 10),
+  port: parseInt(process.env.PORT ?? '4720', 10),
   jwtSecret: process.env.JWT_SECRET ?? 'change-me-in-production',
   appUser: process.env.APP_USER ?? 'admin',
   appPassword: process.env.APP_PASSWORD ?? 'i9team',
